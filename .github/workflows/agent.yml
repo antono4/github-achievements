@@ -82,10 +82,13 @@ jobs:
           fi
           git push --set-upstream origin "${branch}" --force-with-lease
 
-          pr_num="$(curl -s -X POST -H "${auth}" -H "${accept}" -H "Content-Type: application/json" \
+          pr_num="$(curl -s -o /tmp/pr.json -w '%{http_code}' -X POST -H "${auth}" -H "${accept}" -H "Content-Type: application/json" \
             "${api}/pulls" \
-            -d "{\"title\":\"chore: achievement run ${ts}\",\"head\":\"${branch}\",\"base\":\"${DEFAULT_BRANCH}\",\"body\":\"Auto-generated PR for achievement runs.\"}" \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['number']) if 'number' in d else (print('ERR:',d), sys.exit(1))")"
+            -d "{\"title\":\"chore: achievement run ${ts}\",\"head\":\"${branch}\",\"base\":\"${DEFAULT_BRANCH}\",\"body\":\"Auto-generated PR for achievement runs.\"}")"
+          echo "PR create HTTP ${pr_num}; response:"
+          python3 -c "import json; d=json.load(open('/tmp/pr.json')); print('  number=',d.get('number'),'message=',d.get('message'),'errors=',d.get('errors'))"
+          test "${pr_num}" = "201"
+          pr_num="$(python3 -c "import json; print(json.load(open('/tmp/pr.json'))['number'])")"
           echo "opened PR #${pr_num}"
 
           merge_status="$(curl -s -o /tmp/merge.json -w '%{http_code}' -X PUT -H "${auth}" -H "${accept}" -H "Content-Type: application/json" \
