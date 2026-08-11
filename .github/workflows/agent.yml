@@ -1,0 +1,88 @@
+name: Achievements Farm
+
+on:
+  schedule:
+    # Requested every 3 minutes. Note: GitHub Actions cron is throttled to
+    # a minimum of ~5 minutes between runs, so effective frequency is ~5 min.
+    - cron: "*/3 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: achievements-farm
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  farm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Resolve token
+        id: token
+        run: |
+          if [ -n "${{ secrets.GH_TOKEN }}" ]; then
+            echo "token=${{ secrets.GH_TOKEN }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::GH_TOKEN secret not set; using GITHUB_TOKEN. Achievements will NOT be credited to your user (attributed to github-actions[bot])."
+            echo "token=${{ github.token }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name  "${{ vars.GH_USER_NAME  || github.repository_owner }}"
+          git config user.email "${{ vars.GH_USER_EMAIL || format('{0}@users.noreply.github.com', github.repository_owner) }}"
+
+      - name: Setup gh
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: echo "${GH_TOKEN}" | gh auth login --with-token
+
+      - name: Farm achievements
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ github.repository }}
+          COAUTHOR_NAME: ${{ vars.COAUTHOR_NAME }}
+          COAUTHOR_EMAIL: ${{ vars.COAUTHOR_EMAIL }}
+        run: |
+          set -euo pipefail
+          ts="$(date -u +%s)"
+          branch="chore/achievements-${ts}"
+          marker="timestamp_${ts}"
+
+          # ---- Pull Shark + YOLO: open & merge a trivial PR ----
+          git checkout -b "${branch}"
+          mkdir -p .achievements
+          printf '%s\n' "${marker}" > ".achievements/${marker}"
+          git add ".achievements/${marker}"
+          git commit -m "chore: achievement run ${ts}"
+
+          git push --set-upstream origin "${branch}" --force-with-lease
+
+          pr_url="$(gh pr create --repo "${REPO}" \
+            --head "${branch}" \
+            --title "chore: achievement run ${ts}" \
+            --body "Auto-generated PR for achievement runs.")"
+
+          # --admin allows merge even when branch protection would block it.
+          gh pr merge "${pr_url}" --repo "${REPO}" \
+            --squash --delete-branch --admin
+
+          # ---- Quickdraw: open & close an issue within 5 minutes ----
+          issue_url="$(gh issue create --repo "${REPO}" \
+            --title "run ${ts}" \
+            --body "Auto-generated for Quickdraw.")"
+          gh issue close "${issue_url}" --repo "${REPO}"
+
+      - name: Summary
+        if: always()
+        run: echo "Achievement run done at $(date -u)."
