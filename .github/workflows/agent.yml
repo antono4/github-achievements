@@ -50,7 +50,9 @@ jobs:
 
       - name: Farm achievements
         env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN || github.token }}
           REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           COAUTHOR_NAME: ${{ vars.COAUTHOR_NAME }}
           COAUTHOR_EMAIL: ${{ vars.COAUTHOR_EMAIL }}
         run: |
@@ -59,29 +61,44 @@ jobs:
           branch="chore/achievements-${ts}"
           marker="timestamp_${ts}"
 
+          auth="Authorization: Bearer ${GH_TOKEN}"
+          api="https://api.github.com/repos/${REPO}"
+          accept="Accept: application/vnd.github+json"
+
           # ---- Pull Shark + YOLO: open & merge a trivial PR ----
           git checkout -b "${branch}"
           mkdir -p .achievements
           printf '%s\n' "${marker}" > ".achievements/${marker}"
           git add ".achievements/${marker}"
-          git commit -m "chore: achievement run ${ts}"
-
+          commit_msg="chore: achievement run ${ts}"
+          if [ -n "${COAUTHOR_NAME}" ] && [ -n "${COAUTHOR_EMAIL}" ]; then
+            git commit -m "${commit_msg}" \
+              -m "Co-authored-by: ${COAUTHOR_NAME} <${COAUTHOR_EMAIL}>"
+          else
+            git commit -m "${commit_msg}"
+          fi
           git push --set-upstream origin "${branch}" --force-with-lease
 
-          pr_url="$(gh pr create --repo "${REPO}" \
-            --head "${branch}" \
-            --title "chore: achievement run ${ts}" \
-            --body "Auto-generated PR for achievement runs.")"
+          pr_num="$(curl -s -X POST -H "${auth}" -H "${accept}" -H "Content-Type: application/json" \
+            "${api}/pulls" \
+            -d "{\"title\":\"chore: achievement run ${ts}\",\"head\":\"${branch}\",\"base\":\"${DEFAULT_BRANCH}\",\"body\":\"Auto-generated PR for achievement runs.\"}" \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['number']) if 'number' in d else (print('ERR:',d), sys.exit(1))")"
+          echo "opened PR #${pr_num}"
 
-          # --admin allows merge even when branch protection would block it.
-          gh pr merge "${pr_url}" --repo "${REPO}" \
-            --squash --delete-branch --admin
+          merge_status="$(curl -s -o /tmp/merge.json -w '%{http_code}' -X PUT -H "${auth}" -H "${accept}" -H "Content-Type: application/json" \
+            "${api}/pulls/${pr_num}/merge" \
+            -d "{\"merge_method\":\"squash\",\"commit_title\":\"chore: achievement run ${ts} (#${pr_num})\"}")"
+          python3 -c "import json; d=json.load(open('/tmp/merge.json')); ok=d.get('merged') or d.get('message'); print(f'merge HTTP ${merge_status}: {ok}')"
+          test "${merge_status}" = "200"
 
           # ---- Quickdraw: open & close an issue within 5 minutes ----
-          issue_url="$(gh issue create --repo "${REPO}" \
-            --title "run ${ts}" \
-            --body "Auto-generated for Quickdraw.")"
-          gh issue close "${issue_url}" --repo "${REPO}"
+          issue_num="$(curl -s -X POST -H "${auth}" -H "${accept}" -H "Content-Type: application/json" \
+            "${api}/issues" \
+            -d "{\"title\":\"run ${ts}\",\"body\":\"Auto-generated for Quickdraw.\"}" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['number'])")"
+          curl -s -X PATCH -H "${auth}" -H "${accept}" -H "Content-Type: application/json" \
+            "${api}/issues/${issue_num}" -d '{"state":"closed"}' >/dev/null
+          echo "opened & closed issue #${issue_num}"
 
       - name: Summary
         if: always()
