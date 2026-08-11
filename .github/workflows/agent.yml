@@ -1,15 +1,16 @@
 name: Achievements Farm
 
 on:
+  # GitHub Actions throttles scheduled runs to a minimum of ~5 minutes, so a
+  # plain "*/3" cron cannot achieve a true 3-minute cadence. Instead we start a
+  # long-running job every hour that loops internally every 3 minutes.
   schedule:
-    # Requested every 3 minutes. Note: GitHub Actions cron is throttled to
-    # a minimum of ~5 minutes between runs, so effective frequency is ~5 min.
-    - cron: "*/3 * * * *"
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 concurrency:
   group: achievements-farm
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -19,7 +20,7 @@ permissions:
 jobs:
   farm:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 60
     env:
       # gh CLI on Actions runners is auto-authenticated via GH_TOKEN. We point it
       # at a PAT (if provided) so contributions are attributed to the user; otherwise
@@ -48,64 +49,82 @@ jobs:
           git config user.name  "${{ vars.GH_USER_NAME  || github.repository_owner }}"
           git config user.email "${{ vars.GH_USER_EMAIL || format('{0}@users.noreply.github.com', github.repository_owner) }}"
 
-      - name: Farm achievements
+      - name: Farm achievements (loop every 3 minutes)
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN || github.token }}
           REPO: ${{ github.repository }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           COAUTHOR_NAME: ${{ vars.COAUTHOR_NAME }}
           COAUTHOR_EMAIL: ${{ vars.COAUTHOR_EMAIL }}
+          # How long to keep looping (seconds). Kept under timeout-minutes.
+          LOOP_SECONDS: "3300"
+          # Sleep between iterations (seconds) — the requested 3-minute cadence.
+          INTERVAL_SECONDS: "180"
         run: |
-          set -euo pipefail
-          ts="$(date -u +%s)"
-          branch="chore/achievements-${ts}"
-          marker="timestamp_${ts}"
-
+          set -uo pipefail
           auth="Authorization: Bearer ${GH_TOKEN}"
           api="https://api.github.com/repos/${REPO}"
           accept="Accept: application/vnd.github+json"
-
-          # Use the token explicitly for push (avoids credential-helper prompt issues).
+          # Push auth via explicit remote URL (avoids credential-helper prompts).
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
 
-          # ---- Pull Shark + YOLO: open & merge a trivial PR ----
-          git checkout -b "${branch}"
-          mkdir -p .achievements
-          printf '%s\n' "${marker}" > ".achievements/${marker}"
-          git add ".achievements/${marker}"
-          commit_msg="chore: achievement run ${ts}"
-          if [ -n "${COAUTHOR_NAME}" ] && [ -n "${COAUTHOR_EMAIL}" ]; then
-            git commit -m "${commit_msg}" \
-              -m "Co-authored-by: ${COAUTHOR_NAME} <${COAUTHOR_EMAIL}>"
-          else
-            git commit -m "${commit_msg}"
-          fi
-          git push --set-upstream origin "${branch}" --force-with-lease
+          farm_once() {
+            local ts branch marker commit_msg pr_num pr_http merge_status issue_num
+            ts="$(date -u +%s)"
+            branch="chore/achievements-${ts}"
+            marker="timestamp_${ts}"
 
-          pr_num="$(curl -s -o /tmp/pr.json -w '%{http_code}' -X POST -H "${auth}" -H "${accept}" -H "Content-Type: application/json" \
-            "${api}/pulls" \
-            -d "{\"title\":\"chore: achievement run ${ts}\",\"head\":\"${branch}\",\"base\":\"${DEFAULT_BRANCH}\",\"body\":\"Auto-generated PR for achievement runs.\"}")"
-          echo "PR create HTTP ${pr_num}; response:"
-          python3 -c "import json; d=json.load(open('/tmp/pr.json')); print('  number=',d.get('number'),'message=',d.get('message'),'errors=',d.get('errors'))"
-          test "${pr_num}" = "201"
-          pr_num="$(python3 -c "import json; print(json.load(open('/tmp/pr.json'))['number'])")"
-          echo "opened PR #${pr_num}"
+            # Fresh base each iteration so the PR head isn't behind main.
+            git fetch --quiet origin "${DEFAULT_BRANCH}"
+            git checkout -B "${branch}" "origin/${DEFAULT_BRANCH}"
 
-          merge_status="$(curl -s -o /tmp/merge.json -w '%{http_code}' -X PUT -H "${auth}" -H "${accept}" -H "Content-Type: application/json" \
-            "${api}/pulls/${pr_num}/merge" \
-            -d "{\"merge_method\":\"squash\",\"commit_title\":\"chore: achievement run ${ts} (#${pr_num})\"}")"
-          python3 -c "import json; d=json.load(open('/tmp/merge.json')); ok=d.get('merged') or d.get('message'); print(f'merge HTTP ${merge_status}: {ok}')"
-          test "${merge_status}" = "200"
+            mkdir -p .achievements
+            printf '%s\n' "${marker}" > ".achievements/${marker}"
+            git add ".achievements/${marker}"
+            commit_msg="chore: achievement run ${ts}"
+            if [ -n "${COAUTHOR_NAME}" ] && [ -n "${COAUTHOR_EMAIL}" ]; then
+              git commit -q -m "${commit_msg}" -m "Co-authored-by: ${COAUTHOR_NAME} <${COAUTHOR_EMAIL}>"
+            else
+              git commit -q -m "${commit_msg}"
+            fi
+            git push --quiet --set-upstream origin "${branch}" --force-with-lease
 
-          # ---- Quickdraw: open & close an issue within 5 minutes ----
-          issue_num="$(curl -s -X POST -H "${auth}" -H "${accept}" -H "Content-Type: application/json" \
-            "${api}/issues" \
-            -d "{\"title\":\"run ${ts}\",\"body\":\"Auto-generated for Quickdraw.\"}" \
-            | python3 -c "import sys,json; print(json.load(sys.stdin)['number'])")"
-          curl -s -X PATCH -H "${auth}" -H "${accept}" -H "Content-Type: application/json" \
-            "${api}/issues/${issue_num}" -d '{"state":"closed"}' >/dev/null
-          echo "opened & closed issue #${issue_num}"
+            # ---- Pull Shark + YOLO: open & squash-merge a trivial PR ----
+            pr_http="$(curl -s -o /tmp/pr.json -w '%{http_code}' -X POST -H "${auth}" -H "${accept}" -H "Content-Type: application/json" \
+              "${api}/pulls" \
+              -d "{\"title\":\"chore: achievement run ${ts}\",\"head\":\"${branch}\",\"base\":\"${DEFAULT_BRANCH}\",\"body\":\"Auto-generated PR for achievement runs.\"}")"
+            if [ "${pr_http}" != "201" ]; then
+              echo "[$(date -u +%T)] PR create HTTP ${pr_http}: $(python3 -c "import json;d=json.load(open('/tmp/pr.json'));print(d.get('message'))" 2>/dev/null)"
+              return 1
+            fi
+            pr_num="$(python3 -c "import json;print(json.load(open('/tmp/pr.json'))['number'])")"
+
+            merge_status="$(curl -s -o /tmp/merge.json -w '%{http_code}' -X PUT -H "${auth}" -H "${accept}" -H "Content-Type: application/json" \
+              "${api}/pulls/${pr_num}/merge" \
+              -d "{\"merge_method\":\"squash\",\"commit_title\":\"chore: achievement run ${ts} (#${pr_num})\"}")"
+            echo "[$(date -u +%T)] PR #${pr_num} merged HTTP ${merge_status}: $(python3 -c "import json;d=json.load(open('/tmp/merge.json'));print(d.get('merged') or d.get('message'))" 2>/dev/null)"
+            [ "${merge_status}" = "200" ] || return 1
+
+            # ---- Quickdraw: open & close an issue within 5 minutes ----
+            issue_num="$(curl -s -X POST -H "${auth}" -H "${accept}" -H "Content-Type: application/json" \
+              "${api}/issues" \
+              -d "{\"title\":\"run ${ts}\",\"body\":\"Auto-generated for Quickdraw.\"}" \
+              | python3 -c "import sys,json;print(json.load(sys.stdin)['number'])" 2>/dev/null)"
+            curl -s -o /dev/null -X PATCH -H "${auth}" -H "${accept}" -H "Content-Type: application/json" \
+              "${api}/issues/${issue_num}" -d '{"state":"closed"}'
+            echo "[$(date -u +%T)] issue #${issue_num} opened & closed"
+          }
+
+          end=$(( $(date +%s) + LOOP_SECONDS ))
+          i=1
+          while [ "$(date +%s)" -lt "${end}" ]; do
+            echo "=== iteration ${i} @ $(date -u +%T) ==="
+            farm_once || echo "[$(date -u +%T)] iteration ${i} failed; will retry next interval"
+            i=$((i+1))
+            # Sleep unless this is the final iteration.
+            [ "$(date +%s)" -lt "${end}" ] && sleep "${INTERVAL_SECONDS}"
+          done
 
       - name: Summary
         if: always()
-        run: echo "Achievement run done at $(date -u)."
+        run: echo "Achievement loop ended at $(date -u)."
