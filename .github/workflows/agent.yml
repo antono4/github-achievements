@@ -38,7 +38,7 @@ jobs:
           fi
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           token: ${{ steps.token.outputs.token }}
           fetch-depth: 0
@@ -64,6 +64,9 @@ jobs:
           auth="Authorization: Bearer ${GH_TOKEN}"
           api="https://api.github.com/repos/${REPO}"
           accept="Accept: application/vnd.github+json"
+
+          # Use the token explicitly for push (avoids credential-helper prompt issues).
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
 
           # ---- Pull Shark + YOLO: open & merge a trivial PR ----
           git checkout -b "${branch}"
