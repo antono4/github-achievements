@@ -20,14 +20,20 @@ jobs:
   farm:
     runs-on: ubuntu-latest
     timeout-minutes: 4
+    env:
+      # gh CLI on Actions runners is auto-authenticated via GH_TOKEN. We point it
+      # at a PAT (if provided) so contributions are attributed to the user; otherwise
+      # it falls back to the runner's default github.token.
+      GH_TOKEN: ${{ secrets.PAT_TOKEN || github.token }}
     steps:
       - name: Resolve token
         id: token
         run: |
-          if [ -n "${{ secrets.GH_TOKEN }}" ]; then
-            echo "token=${{ secrets.GH_TOKEN }}" >> "$GITHUB_OUTPUT"
+          if [ -n "${{ secrets.PAT_TOKEN }}" ]; then
+            echo "token=${{ secrets.PAT_TOKEN }}" >> "$GITHUB_OUTPUT"
+            echo "::notice::Using PAT_TOKEN — achievements will be credited to your user."
           else
-            echo "::warning::GH_TOKEN secret not set; using GITHUB_TOKEN. Achievements will NOT be credited to your user (attributed to github-actions[bot])."
+            echo "::warning::PAT_TOKEN secret not set; using GITHUB_TOKEN. Achievements will NOT be credited to your user (attributed to github-actions[bot])."
             echo "token=${{ github.token }}" >> "$GITHUB_OUTPUT"
           fi
 
@@ -42,14 +48,8 @@ jobs:
           git config user.name  "${{ vars.GH_USER_NAME  || github.repository_owner }}"
           git config user.email "${{ vars.GH_USER_EMAIL || format('{0}@users.noreply.github.com', github.repository_owner) }}"
 
-      - name: Setup gh
-        env:
-          GH_TOKEN: ${{ steps.token.outputs.token }}
-        run: echo "${GH_TOKEN}" | gh auth login --with-token
-
       - name: Farm achievements
         env:
-          GH_TOKEN: ${{ steps.token.outputs.token }}
           REPO: ${{ github.repository }}
           COAUTHOR_NAME: ${{ vars.COAUTHOR_NAME }}
           COAUTHOR_EMAIL: ${{ vars.COAUTHOR_EMAIL }}
