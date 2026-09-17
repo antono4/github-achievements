@@ -5,7 +5,8 @@ on:
   # plain "*/3" cron cannot achieve a true 3-minute cadence. Instead we start a
   # long-running job every hour that loops internally every 3 minutes.
   schedule:
-    - cron: "0 * * * *"
+    # setiap 10 menit
+    - cron: "*/10 * * * *"
   workflow_dispatch:
 
 concurrency:
